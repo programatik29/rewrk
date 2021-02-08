@@ -1,5 +1,9 @@
+use crate::proto::tcp_stream;
+
 use std::str::FromStr;
 use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::time::Duration;
 use tokio::net::TcpStream;
@@ -34,10 +38,10 @@ pub async fn client(
 ) -> Result<WorkerResult, String> {
     let uri = conv_err!( Uri::from_str(&uri_string) )?;
 
-    let mut session = start_session(&uri).await?;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut session = start_session(&uri, counter.clone()).await?;
 
     let mut times: Vec<Duration> = Vec::with_capacity(predicted_size);
-    let mut buffer_counter: usize = 0;
 
     let start = Instant::now();
     while start.elapsed() < until {
@@ -53,14 +57,13 @@ pub async fn client(
             let status = r.status();
             assert_eq!(status, StatusCode::OK);
 
-            let buff = match hyper::body::to_bytes(r).await {
+            let _buff = match hyper::body::to_bytes(r).await {
                 Ok(buff) => buff,
                 Err(e) => return Err(format!(
                     "Failed to read stream {:?}",
                      e
                 ))
             };
-            buffer_counter += buff.len();
         }
 
         times.push(took);
@@ -71,19 +74,22 @@ pub async fn client(
     let result = WorkerResult{
         total_times: vec![time_taken],
         request_times: times,
-        buffer_sizes: vec![buffer_counter]
+        buffer_sizes: vec![counter.load(Ordering::SeqCst)]
     };
 
     Ok(result)
 }
 
-async fn start_session(uri: &Uri) -> Result<conn::SendRequest<Body>, String> {
+async fn start_session(uri: &Uri, counter: Arc<AtomicUsize>) -> Result<conn::SendRequest<Body>, String> {
     let host = uri.host().ok_or("cant find host")?;
     let port = uri.port_u16().unwrap_or(80);
 
     let host_port = format!("{}:{}", host, port);
 
-    let stream = conv_err!( TcpStream::connect(&host_port).await )?;
+    let stream = tcp_stream::CustomTcpStream::new(
+        conv_err!( TcpStream::connect(&host_port).await )?,
+        counter
+    );
 
     let (session, connection) = conv_err!( conn::handshake(stream).await )?;
     tokio::spawn(async move {
