@@ -1,17 +1,16 @@
-use async_channel::Receiver;
-
 use std::str::FromStr;
 use std::time::Instant;
 
 use tokio::time::Duration;
 use tokio::net::TcpStream;
 
+use hyper::Body;
 use hyper::Uri;
 use hyper::StatusCode;
 use hyper::client::conn;
 
 use crate::results::WorkerResult;
-use crate::utils::get_request_new;
+use crate::utils::get_request;
 
 /// A macro that converts Error to String
 macro_rules! conv_err {
@@ -29,35 +28,20 @@ macro_rules! conv_err {
 /// worker which can then be sent back to the controller when the handle
 /// is awaited.
 pub async fn client(
-    waiter: Receiver<()>,
+    until: Duration,
     uri_string: String,
     predicted_size: usize,
 ) -> Result<WorkerResult, String> {
     let uri = conv_err!( Uri::from_str(&uri_string) )?;
 
-    let host = uri.host().ok_or("cant find host")?;
-    let port = uri.port_u16().unwrap_or(80);
-    
-    let host_port = format!("{}:{}", host, port);
-
-    let stream = conv_err!( TcpStream::connect(&host_port).await )?;
-
-    let (mut session, connection) = conv_err!( conn::handshake(stream).await )?;
-    tokio::spawn(async move {
-        if let Err(_) = connection.await {
-        
-        }
-
-        // Connection died
-        // Should reconnect and log
-    });
+    let mut session = start_session(&uri).await?;
 
     let mut times: Vec<Duration> = Vec::with_capacity(predicted_size);
     let mut buffer_counter: usize = 0;
 
     let start = Instant::now();
-    while let Ok(_) = waiter.recv().await {
-        let req = get_request_new(&uri);
+    while start.elapsed() < until {
+        let req = get_request(&uri);
 
         let ts = Instant::now();
         let re = session.send_request(req).await;
@@ -93,4 +77,23 @@ pub async fn client(
     Ok(result)
 }
 
+async fn start_session(uri: &Uri) -> Result<conn::SendRequest<Body>, String> {
+    let host = uri.host().ok_or("cant find host")?;
+    let port = uri.port_u16().unwrap_or(80);
 
+    let host_port = format!("{}:{}", host, port);
+
+    let stream = conv_err!( TcpStream::connect(&host_port).await )?;
+
+    let (session, connection) = conv_err!( conn::handshake(stream).await )?;
+    tokio::spawn(async move {
+        if let Err(_) = connection.await {
+
+        }
+
+        // Connection died
+        // Should reconnect and log
+    });
+
+    Ok(session)
+}

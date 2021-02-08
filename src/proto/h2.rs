@@ -1,15 +1,21 @@
-use async_channel::Receiver;
-
+use std::str::FromStr;
 use std::time::Instant;
 
 use tokio::time::Duration;
+use tokio::net::TcpStream;
 
+use hyper::Body;
+use hyper::Uri;
 use hyper::StatusCode;
-use hyper::Client;
+use hyper::client::conn;
 
 use crate::results::WorkerResult;
 use crate::utils::get_request;
 
+/// A macro that converts Error to String
+macro_rules! conv_err {
+    ( $e:expr ) => ( $e.map_err(|e| format!("{}", e)) )
+}
 
 /// A single http/1 connection worker
 ///
@@ -24,23 +30,23 @@ use crate::utils::get_request;
 ///
 /// todo Make concurrent handling for h2 tests
 pub async fn client(
-    waiter: Receiver<()>,
-    host: String,
+    until: Duration,
+    uri_string: String,
     predicted_size: usize,
 ) -> Result<WorkerResult, String> {
-    let session = Client::builder()
-        .http2_only(true)
-        .build_http();
+    let uri = conv_err!( Uri::from_str(&uri_string) )?;
+
+    let mut session = start_session(&uri).await?;
 
     let mut times: Vec<Duration> = Vec::with_capacity(predicted_size);
     let mut buffer_counter: usize = 0;
 
     let start = Instant::now();
-    while let Ok(_) = waiter.recv().await {
-        let req = get_request(&host);
+    while start.elapsed() < until {
+        let req = get_request(&uri);
 
         let ts = Instant::now();
-        let re = session.request(req).await;
+        let re = session.send_request(req).await;
         let took = ts.elapsed();
 
         if let Err(e) = &re {
@@ -72,3 +78,26 @@ pub async fn client(
 
     Ok(result)
 }
+
+async fn start_session(uri: &Uri) -> Result<conn::SendRequest<Body>, String> {
+    let host = uri.host().ok_or("cant find host")?;
+    let port = uri.port_u16().unwrap_or(80);
+
+    let host_port = format!("{}:{}", host, port);
+
+    let stream = conv_err!( TcpStream::connect(&host_port).await )?;
+
+    let (session, connection) = conv_err!( conn::handshake(stream).await )?;
+    tokio::spawn(async move {
+        if let Err(_) = connection.await {
+
+        }
+
+        // Connection died
+        // Should reconnect and log
+    });
+
+    Ok(session)
+}
+
+
